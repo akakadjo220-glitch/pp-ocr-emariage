@@ -6,3 +6,4 @@ pillow==10.4.0
 python-multipart==0.0.9
 numpy
 httpx
+onnxruntime==1.18.1
