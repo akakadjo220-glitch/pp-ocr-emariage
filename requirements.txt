@@ -1,0 +1,8 @@
+paddlepaddle==3.0.0
+paddleocr==3.7.0
+fastapi==0.115.0
+uvicorn==0.30.0
+pillow==10.4.0
+python-multipart==0.0.9
+setuptools
+wheel
