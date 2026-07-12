@@ -35,7 +35,7 @@ COPY server.py .
 COPY parsers.py .
 
 # Pré-télécharger le modèle Medium au build
-RUN python -c "from paddleocr import PaddleOCR; ocr = PaddleOCR(lang='fr', use_textline_orientation=True); print('Modele PP-OCRv6 Medium telecharge')"
+#RUN python -c "from paddleocr import PaddleOCR; ocr = PaddleOCR(lang='fr', use_textline_orientation=True); print('Modele PP-OCRv6 Medium telecharge')"
 
 EXPOSE 8100
 
