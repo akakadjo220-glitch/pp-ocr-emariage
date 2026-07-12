@@ -36,11 +36,7 @@ ocr = PaddleOCR(
     use_angle_cls=True,
     lang='fr',
     use_gpu=False,
-    show_log=False,
-    ocr_version='PP-OCRv4',
-    # Forcer le modèle Medium
-    det_model_name='PP-OCRv4_mobile_det',
-    rec_model_name='PP-OCRv4_mobile_rec'
+    show_log=False
 )
 logger.info("PP-OCRv6 Medium chargé avec succès ✅")
 
