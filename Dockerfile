@@ -20,15 +20,15 @@ RUN pip install setuptools wheel
 # Copier requirements.txt
 COPY requirements.txt .
 
-# Installer les dépendances Python (PaddlePaddle 2.6.2 au lieu de 3.0.0)
+# Installer les dépendances Python
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copier le code
 COPY server.py .
 COPY parsers.py .
 
-# Pré-télécharger le modèle Medium au build
-RUN python -c "from paddleocr import PaddleOCR; ocr = PaddleOCR(lang='fr', use_textline_orientation=True); print('Modele PP-OCRv6 Medium telecharge')"
+# Pré-télécharger le modèle SERVER au build (plus précis que medium, pas de bug strides)
+RUN python -c "from paddleocr import PaddleOCR; ocr = PaddleOCR(lang='fr', use_textline_orientation=True, det_model='PP-OCRv6_server_det', rec_model='PP-OCRv6_server_rec'); print('Modele PP-OCRv6 Server telecharge')"
 
 # Exposer le port
 EXPOSE 8100
