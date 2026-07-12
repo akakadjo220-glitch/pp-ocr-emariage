@@ -2,11 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# 🚨 FIX CRITIQUE : Désactiver le backend PIR de Paddle 3.0.0 pour éviter le bug "strides"
-ENV FLAGS_enable_pir_api=0
-ENV FLAGS_enable_pir_in_executor=0
-
-# Installer les dépendances système (ajout de curl pour le healthcheck Coolify)
+# Installer les dépendances système
 RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
     libsm6 \
@@ -24,14 +20,14 @@ RUN pip install setuptools wheel
 # Copier requirements.txt
 COPY requirements.txt .
 
-# Installer les dépendances Python
+# Installer les dépendances Python (PaddlePaddle 2.6.2 au lieu de 3.0.0)
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copier le code
 COPY server.py .
 COPY parsers.py .
 
-# Pré-télécharger le modèle Medium au build (le fix PIR est déjà actif via les ENV)
+# Pré-télécharger le modèle Medium au build
 RUN python -c "from paddleocr import PaddleOCR; ocr = PaddleOCR(lang='fr', use_textline_orientation=True); print('Modele PP-OCRv6 Medium telecharge')"
 
 # Exposer le port
