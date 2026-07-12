@@ -33,9 +33,9 @@ app.add_middleware(
 # ── Initialiser PP-OCRv6 Medium UNE SEULE FOIS ──
 logger.info("Chargement PP-OCRv6 Medium 34.5M...")
 ocr = PaddleOCR(
-    use_angle_cls=True,
+    use_textline_orientation=True,
     lang='fr',
-    use_gpu=False
+    
 )
 logger.info("PP-OCRv6 Medium chargé avec succès ✅")
 
