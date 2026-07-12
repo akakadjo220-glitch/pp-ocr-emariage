@@ -35,8 +35,7 @@ logger.info("Chargement PP-OCRv6 Medium 34.5M...")
 ocr = PaddleOCR(
     use_angle_cls=True,
     lang='fr',
-    use_gpu=False,
-    show_log=False
+    use_gpu=False
 )
 logger.info("PP-OCRv6 Medium chargé avec succès ✅")
 
