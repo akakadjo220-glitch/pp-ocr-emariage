@@ -1,9 +1,4 @@
 import os
-# 🚨 FIX CRITIQUE : Désactiver le backend PIR de Paddle 3.0.0 pour éviter le bug "strides"
-# DOIT être exécuté AVANT d'importer PaddleOCR
-os.environ["FLAGS_enable_pir_api"] = "0"
-os.environ["FLAGS_enable_pir_in_executor"] = "0"
-
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
 from paddleocr import PaddleOCR
@@ -17,16 +12,18 @@ from PIL import Image
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="PP-OCRv6 Medium API - E-mariage", version="1.0.0")
+app = FastAPI(title="PP-OCRv6 Server API - E-mariage", version="1.0.0")
 
-# Initialisation de PaddleOCR avec PP-OCRv6_medium
-logger.info("Chargement PP-OCRv6 Medium 34.5M...")
+# Initialisation de PaddleOCR avec PP-OCRv6_server (plus précis que medium)
+logger.info("Chargement PP-OCRv6 Server...")
 try:
     ocr = PaddleOCR(
         lang='fr',
-        use_textline_orientation=True
+        use_textline_orientation=True,
+        det_model='PP-OCRv6_server_det',
+        rec_model='PP-OCRv6_server_rec'
     )
-    logger.info("PP-OCRv6 Medium chargé avec succès ✅")
+    logger.info("PP-OCRv6 Server chargé avec succès ✅")
 except Exception as e:
     logger.error(f"Erreur de chargement: {e}")
     raise
@@ -34,7 +31,7 @@ except Exception as e:
 @app.get("/sante")
 async def health_check():
     """Endpoint pour le healthcheck de Coolify"""
-    return {"status": "healthy", "model": "PP-OCRv6_medium"}
+    return {"status": "healthy", "model": "PP-OCRv6_server"}
 
 @app.post("/ocr")
 async def ocr_endpoint(file: UploadFile = File(...)):
@@ -44,11 +41,11 @@ async def ocr_endpoint(file: UploadFile = File(...)):
         # Lire l'image uploadée
         contents = await file.read()
         image = Image.open(io.BytesIO(contents))
-        
+
         # Convertir en RGB pour éviter les erreurs (RGBA, niveaux de gris, etc.)
         if image.mode != 'RGB':
             image = image.convert('RGB')
-        
+
         # Convertir en array numpy pour PaddleOCR
         img_array = np.array(image)
 
@@ -88,10 +85,10 @@ async def ocr_from_url(url: str):
             image = Image.open(io.BytesIO(response.content))
             if image.mode != 'RGB':
                 image = image.convert('RGB')
-            
+
             img_array = np.array(image)
             result = ocr.ocr(img_array, cls=True)
-            
+
             texts = []
             if result and result[0]:
                 for line in result[0]:
@@ -100,7 +97,7 @@ async def ocr_from_url(url: str):
                         "confidence": float(line[1][1]),
                         "box": line[0]
                     })
-            
+
             return {"status": "success", "results": texts}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
