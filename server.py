@@ -1,6 +1,9 @@
 import os
+
+# FIX CRITIQUE : Forcer ONNX Runtime AVANT tout import
+os.environ["PADDLE_PDX_INFERENCE_BACKEND"] = "onnx"
+
 from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import JSONResponse
 from paddleocr import PaddleOCR
 import logging
 import time
@@ -8,53 +11,47 @@ import io
 import numpy as np
 from PIL import Image
 
-# Configuration du logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="PP-OCRv6 Server API - E-mariage", version="1.0.0")
+app = FastAPI(title="PP-OCRv6 Medium API - E-mariage", version="1.0.0")
 
-# Initialisation de PaddleOCR avec PP-OCRv6_server (plus précis que medium)
-logger.info("Chargement PP-OCRv6 Server...")
-try:
-    ocr = PaddleOCR(
-        lang='fr',
-        use_textline_orientation=True,
-        det_model='PP-OCRv6_server_det',
-        rec_model='PP-OCRv6_server_rec'
-    )
-    logger.info("PP-OCRv6 Server chargé avec succès ✅")
-except Exception as e:
-    logger.error(f"Erreur de chargement: {e}")
-    raise
+# Variable globale pour lazy loading
+_ocr_instance = None
+
+def get_ocr_instance():
+    global _ocr_instance
+    if _ocr_instance is None:
+        logger.info("Initialisation PaddleOCR avec backend ONNX...")
+        try:
+            _ocr_instance = PaddleOCR(
+                lang='fr',
+                use_textline_orientation=True
+            )
+            logger.info("PP-OCRv6 Medium chargé via ONNX ✅")
+        except Exception as e:
+            logger.error(f"Erreur: {e}")
+            raise
+    return _ocr_instance
 
 @app.get("/sante")
 async def health_check():
-    """Endpoint pour le healthcheck de Coolify"""
-    return {"status": "healthy", "model": "PP-OCRv6_server"}
+    return {"status": "healthy", "model": "PP-OCRv6_medium", "backend": "onnx"}
 
 @app.post("/ocr")
 async def ocr_endpoint(file: UploadFile = File(...)):
-    """Endpoint principal pour l'OCR via upload de fichier"""
     start_time = time.time()
     try:
-        # Lire l'image uploadée
         contents = await file.read()
         image = Image.open(io.BytesIO(contents))
-
-        # Convertir en RGB pour éviter les erreurs (RGBA, niveaux de gris, etc.)
         if image.mode != 'RGB':
             image = image.convert('RGB')
-
-        # Convertir en array numpy pour PaddleOCR
         img_array = np.array(image)
-
-        # Exécuter l'OCR
+        
+        ocr = get_ocr_instance()
         result = ocr.ocr(img_array, cls=True)
-
+        
         processing_time = time.time() - start_time
-
-        # Formater la réponse
         texts = []
         if result and result[0]:
             for line in result[0]:
@@ -63,41 +60,12 @@ async def ocr_endpoint(file: UploadFile = File(...)):
                     "confidence": float(line[1][1]),
                     "box": line[0]
                 })
-
+        
         return {
             "status": "success",
             "processing_time_ms": round(processing_time * 1000, 2),
             "results": texts
         }
-
     except Exception as e:
         logger.error(f"Erreur OCR: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/ocr-url")
-async def ocr_from_url(url: str):
-    """Endpoint optionnel pour tester avec une URL d'image"""
-    import httpx
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, timeout=10.0)
-            response.raise_for_status()
-            image = Image.open(io.BytesIO(response.content))
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
-
-            img_array = np.array(image)
-            result = ocr.ocr(img_array, cls=True)
-
-            texts = []
-            if result and result[0]:
-                for line in result[0]:
-                    texts.append({
-                        "text": line[1][0],
-                        "confidence": float(line[1][1]),
-                        "box": line[0]
-                    })
-
-            return {"status": "success", "results": texts}
-    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
