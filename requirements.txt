@@ -1,9 +1,9 @@
-paddlepaddle==3.0.0
-paddleocr==3.7.0
+# Downgrade vers PaddlePaddle 2.6.1 (version stable sans bug PIR)
+paddlepaddle==2.6.1
+paddleocr==2.7.3
 fastapi==0.115.0
 uvicorn==0.30.0
 pillow==10.4.0
 python-multipart==0.0.9
-numpy
+numpy<2.0.0
 httpx
-onnxruntime==1.18.1
