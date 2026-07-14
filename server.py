@@ -1,11 +1,15 @@
 import os
 
-# FIX CRITIQUE : Forcer ONNX Runtime AVANT tout import
-os.environ["PADDLE_PDX_INFERENCE_BACKEND"] = "onnx"
+# FIX : désactiver le nouveau moteur PIR de Paddle 3.0
+# (bug connu "strides is not right" sur CPU avec PP-OCRv6)
+# Ces variables DOIVENT être définies AVANT l'import de paddle/paddleocr
+os.environ["FLAGS_enable_pir_api"] = "0"
+os.environ["FLAGS_use_mkldnn"] = "0"
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from paddleocr import PaddleOCR
+import paddle
 import logging
 import time
 import io
@@ -20,10 +24,17 @@ from parsers import (
     determiner_action
 )
 
+# Sécurité supplémentaire : forcer le flag aussi via l'API Python
+# (au cas où certains sous-modules le lisent après l'import)
+paddle.set_flags({'FLAGS_enable_pir_api': False})
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="PP-OCRv6 Medium API - E-mariage", version="1.0.0")
+app = FastAPI(
+    title="PP-OCRv6 Medium API - E-mariage",
+    version="1.0.0"
+)
 
 # ── CORS : indispensable pour que emariage puisse appeler l'API ──
 app.add_middleware(
@@ -34,21 +45,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Variable globale pour lazy loading
+# Variable globale pour lazy loading (évite le délai au démarrage)
 _ocr_instance = None
+
 
 def get_ocr_instance():
     global _ocr_instance
     if _ocr_instance is None:
-        logger.info("Initialisation PaddleOCR avec backend ONNX...")
+        logger.info("Initialisation PP-OCRv6 Medium (PIR desactive)...")
         try:
             _ocr_instance = PaddleOCR(
                 lang='fr',
+                ocr_version='PP-OCRv6',
                 use_textline_orientation=True
             )
-            logger.info("PP-OCRv6 Medium chargé via ONNX ✅")
+            logger.info("PP-OCRv6 Medium charge avec succes")
         except Exception as e:
-            logger.error(f"Erreur: {e}")
+            logger.error(f"Erreur initialisation OCR: {e}")
             raise
     return _ocr_instance
 
@@ -71,7 +84,11 @@ def extraire_texte(img_array):
 
 @app.get("/sante")
 async def health_check():
-    return {"status": "healthy", "model": "PP-OCRv6_medium", "backend": "onnx"}
+    return {
+        "status": "healthy",
+        "model": "PP-OCRv6_medium",
+        "pir_desactive": True
+    }
 
 
 # ── Endpoint principal utilisé par emariage ──
@@ -94,7 +111,10 @@ async def analyser_base64(data: dict):
     try:
         img_b64 = data.get("image")
         if not img_b64:
-            raise HTTPException(status_code=400, detail="Champ 'image' manquant")
+            raise HTTPException(
+                status_code=400,
+                detail="Champ 'image' manquant"
+            )
 
         type_doc = data.get("type_document", "AUTO")
         declarees = data.get("donnees_declarees", {})
@@ -124,7 +144,10 @@ async def analyser_base64(data: dict):
                 "correspondance": {},
                 "validite_dates": {},
                 "action": "REUPLOADER",
-                "message": "Document illisible. Veuillez uploader une image plus claire."
+                "message": (
+                    "Document illisible. Veuillez uploader "
+                    "une image plus claire."
+                )
             }
 
         infos = parser_document(texte, type_doc)
@@ -135,7 +158,9 @@ async def analyser_base64(data: dict):
         resultat = determiner_action(correspondance, dates, est_lisible)
 
         processing_time = round((time.time() - start_time) * 1000, 2)
-        logger.info(f"Décision: {resultat['action']} en {processing_time}ms")
+        logger.info(
+            f"Decision: {resultat['action']} en {processing_time}ms"
+        )
 
         return {
             "succes": True,
@@ -158,7 +183,10 @@ async def analyser_base64(data: dict):
             "succes": False,
             "erreur": str(e),
             "action": "REUPLOADER",
-            "message": "Une erreur est survenue lors de l'analyse. Veuillez réessayer."
+            "message": (
+                "Une erreur est survenue lors de l'analyse. "
+                "Veuillez reessayer."
+            )
         }
 
 
