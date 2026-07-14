@@ -1,15 +1,13 @@
 import os
 
-# FIX : désactiver le nouveau moteur PIR de Paddle 3.0
-# (bug connu "strides is not right" sur CPU avec PP-OCRv6)
-# Ces variables DOIVENT être définies AVANT l'import de paddle/paddleocr
+# IMPORTANT: Ces variables DOIVENT \u00eatre d\u00e9finies AVANT l'import de paddle/paddleocr
 os.environ["FLAGS_enable_pir_api"] = "0"
 os.environ["FLAGS_use_mkldnn"] = "0"
+os.environ["PADDLE_PDX_INFERENCE_BACKEND"] = "native"
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from paddleocr import PaddleOCR
-import paddle
 import logging
 import time
 import io
@@ -24,10 +22,6 @@ from parsers import (
     determiner_action
 )
 
-# Sécurité supplémentaire : forcer le flag aussi via l'API Python
-# (au cas où certains sous-modules le lisent après l'import)
-paddle.set_flags({'FLAGS_enable_pir_api': False})
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -36,7 +30,7 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# ── CORS : indispensable pour que emariage puisse appeler l'API ──
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -45,26 +39,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Variable globale pour lazy loading (évite le délai au démarrage)
+# Variable globale pour lazy loading
 _ocr_instance = None
-
 
 def get_ocr_instance():
     global _ocr_instance
     if _ocr_instance is None:
-        logger.info("Initialisation PP-OCRv6 Medium (PIR desactive)...")
+        logger.info("Initialisation PP-OCRv6 Medium (Paddle 2.6.1 stable)...")
         try:
             _ocr_instance = PaddleOCR(
                 lang='fr',
                 ocr_version='PP-OCRv6',
-                use_textline_orientation=True
+                use_textline_orientation=True,
+                use_gpu=False,  # Force CPU pour stabilit\u00e9
+                show_log=False
             )
             logger.info("PP-OCRv6 Medium charge avec succes")
         except Exception as e:
             logger.error(f"Erreur initialisation OCR: {e}")
             raise
     return _ocr_instance
-
 
 def extraire_texte(img_array):
     """Lance l'OCR et retourne le texte brut + confiance moyenne."""
@@ -81,17 +75,14 @@ def extraire_texte(img_array):
     confiance_moy = sum(scores) / len(scores) if scores else 0
     return texte, confiance_moy
 
-
 @app.get("/sante")
 async def health_check():
     return {
         "status": "healthy",
         "model": "PP-OCRv6_medium",
-        "pir_desactive": True
+        "paddle_version": "2.6.1"
     }
 
-
-# ── Endpoint principal utilisé par emariage ──
 @app.post("/analyser-base64")
 async def analyser_base64(data: dict):
     """
@@ -178,7 +169,7 @@ async def analyser_base64(data: dict):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Erreur analyse: {str(e)}")
+        logger.error(f"Erreur analyse: {str(e)}", exc_info=True)
         return {
             "succes": False,
             "erreur": str(e),
@@ -189,8 +180,6 @@ async def analyser_base64(data: dict):
             )
         }
 
-
-# ── Endpoint de test brut (utile pour diagnostiquer avec curl) ──
 @app.post("/ocr")
 async def ocr_endpoint(file: UploadFile = File(...)):
     start_time = time.time()
@@ -220,5 +209,5 @@ async def ocr_endpoint(file: UploadFile = File(...)):
             "results": texts
         }
     except Exception as e:
-        logger.error(f"Erreur OCR: {str(e)}")
+        logger.error(f"Erreur OCR: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
