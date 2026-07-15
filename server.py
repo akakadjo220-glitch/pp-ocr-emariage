@@ -13,13 +13,14 @@ from parsers import (
     parser_document,
     verifier_correspondance,
     verifier_dates,
-    determiner_action
+    determiner_action,
+    verifier_residence_couple
 )
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="OCR API - E-mariage (AIStudio PaddleOCR)", version="2.0.0")
+app = FastAPI(title="OCR API - E-mariage (AIStudio PaddleOCR)", version="2.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,7 +40,9 @@ if not AISTUDIO_TOKEN:
 def choisir_modele(type_doc: str) -> str:
     if type_doc in ("CNI", "PASSEPORT"):
         return "PP-OCRv6"
-    if type_doc in ("EXTRAIT_NAISSANCE", "CERTIFICAT_RESIDENCE"):
+    if type_doc in (
+        "EXTRAIT_NAISSANCE", "CERTIFICAT_RESIDENCE", "CERTIFICAT_PRESENCE_CORPS"
+    ):
         return "PP-StructureV3"
     return "PP-OCRv6"
 
@@ -55,10 +58,7 @@ def soumettre_job(image_bytes: bytes, model: str) -> str:
     else:
         optional_payload["useChartRecognition"] = False
 
-    data = {
-        "model": model,
-        "optionalPayload": json.dumps(optional_payload)
-    }
+    data = {"model": model, "optionalPayload": json.dumps(optional_payload)}
     files = {"file": ("document.jpg", image_bytes, "image/jpeg")}
 
     resp = requests.post(JOB_URL, headers=headers, data=data, files=files, timeout=30)
@@ -149,6 +149,25 @@ async def health_check():
 
 @app.post("/analyser-base64")
 async def analyser_base64(data: dict):
+    """
+    Corps attendu :
+    {
+        "image": "base64...",
+        "type_document": "CNI|PASSEPORT|EXTRAIT_NAISSANCE|CERTIFICAT_RESIDENCE|CERTIFICAT_PRESENCE_CORPS|AUTO",
+        "donnees_declarees": {
+            "nom": "...", "prenoms": "...",
+            "date_naissance": "JJ/MM/AAAA", "numero_piece": "..."
+        },
+        "date_mariage": "JJ/MM/AAAA"   <-- OPTIONNEL
+        (si la date de mariage est deja connue/choisie au moment
+        de cet upload, la fournir permet de verifier directement
+        la validite de l'extrait de naissance contre la VRAIE date
+        du mariage plutot que contre la date du jour. Si absente,
+        la verification se fait contre aujourd'hui et devra etre
+        RE-CONFIRMEE via /revalider-date-mariage une fois la date
+        choisie - voir plus bas.)
+    }
+    """
     start_time = time.time()
     try:
         img_b64 = data.get("image")
@@ -157,6 +176,7 @@ async def analyser_base64(data: dict):
 
         type_doc = data.get("type_document", "AUTO")
         declarees = data.get("donnees_declarees", {})
+        date_mariage = data.get("date_mariage")
 
         img_bytes = base64.b64decode(img_b64)
         image = Image.open(io.BytesIO(img_bytes))
@@ -195,7 +215,7 @@ async def analyser_base64(data: dict):
         infos = parser_document(texte, type_doc)
         infos["confiance_lecture"] = round(confiance_moy * 100, 1)
         correspondance = verifier_correspondance(infos, declarees)
-        dates = verifier_dates(infos, type_doc)
+        dates = verifier_dates(infos, type_doc, date_mariage)
         resultat = determiner_action(correspondance, dates, est_lisible)
 
         processing_time = round((time.time() - start_time) * 1000, 2)
@@ -221,6 +241,62 @@ async def analyser_base64(data: dict):
         logger.error(f"Erreur analyse: {str(e)}")
         return {"succes": False, "erreur": str(e), "action": "REUPLOADER",
                 "message": "Une erreur est survenue. Veuillez reessayer."}
+
+
+@app.post("/revalider-date-mariage")
+async def revalider_date_mariage(data: dict):
+    """
+    A appeler quand la date du mariage est choisie/confirmee
+    (Phase 3-4), pour revalider l'extrait de naissance deja
+    analyse contre la VRAIE date du mariage. Ne refait PAS
+    d'OCR (rapide, pas d'appel cloud AIStudio).
+
+    Corps attendu :
+    {
+        "infos_extraites": {...deja renvoye par /analyser-base64...},
+        "type_document": "EXTRAIT_NAISSANCE",
+        "date_mariage": "JJ/MM/AAAA"
+    }
+    """
+    infos = data.get("infos_extraites")
+    type_doc = data.get("type_document")
+    date_mariage = data.get("date_mariage")
+
+    if not infos or not type_doc or not date_mariage:
+        raise HTTPException(
+            status_code=400,
+            detail="infos_extraites, type_document et date_mariage sont requis"
+        )
+
+    dates = verifier_dates(infos, type_doc, date_mariage)
+    resultat = determiner_action({"score_global": 100, "date_naissance_ok": True,
+                                   "numero_piece_ok": True, "details": {}}, dates, True)
+
+    return {
+        "validite_dates": dates,
+        "action": resultat["action"],
+        "message": resultat["message"] if dates.get("extrait_perime") else (
+            "Document toujours valide a la date du mariage choisie."
+        )
+    }
+
+
+@app.post("/verifier-residence-couple")
+async def verifier_residence(data: dict):
+    """
+    Corps attendu :
+    {
+        "infos_epoux": {...infos_extraites du certificat epoux...},
+        "infos_epouse": {...infos_extraites du certificat epouse...}
+    }
+    """
+    infos_epoux = data.get("infos_epoux", {})
+    infos_epouse = data.get("infos_epouse", {})
+
+    if not infos_epoux or not infos_epouse:
+        raise HTTPException(status_code=400, detail="infos_epoux et infos_epouse sont requis")
+
+    return verifier_residence_couple(infos_epoux, infos_epouse)
 
 
 @app.post("/ocr")
