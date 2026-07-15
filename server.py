@@ -1,18 +1,12 @@
 import os
-
-# IMPORTANT: Ces variables DOIVENT \u00eatre d\u00e9finies AVANT l'import de paddle/paddleocr
-os.environ["FLAGS_enable_pir_api"] = "0"
-os.environ["FLAGS_use_mkldnn"] = "0"
-os.environ["PADDLE_PDX_INFERENCE_BACKEND"] = "native"
-
+import io
+import json
+import time
+import base64
+import logging
+import requests
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from paddleocr import PaddleOCR
-import logging
-import time
-import io
-import base64
-import numpy as np
 from PIL import Image
 
 from parsers import (
@@ -25,12 +19,8 @@ from parsers import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(
-    title="PP-OCRv6 Medium API - E-mariage",
-    version="1.0.0"
-)
+app = FastAPI(title="OCR API - E-mariage (AIStudio PaddleOCR)", version="2.0.0")
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -39,125 +29,184 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Variable globale pour lazy loading
-_ocr_instance = None
+AISTUDIO_TOKEN = os.environ.get("AISTUDIO_TOKEN", "")
+JOB_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
 
-def get_ocr_instance():
-    global _ocr_instance
-    if _ocr_instance is None:
-        logger.info("Initialisation PP-OCRv6 Medium (Paddle 2.6.1 stable)...")
-        try:
-            _ocr_instance = PaddleOCR(
-                lang='fr',
-                ocr_version='PP-OCRv6',
-                use_textline_orientation=True,
-                use_gpu=False,  # Force CPU pour stabilit\u00e9
-                show_log=False
-            )
-            logger.info("PP-OCRv6 Medium charge avec succes")
-        except Exception as e:
-            logger.error(f"Erreur initialisation OCR: {e}")
-            raise
-    return _ocr_instance
+if not AISTUDIO_TOKEN:
+    logger.warning("AISTUDIO_TOKEN non defini ! A configurer dans Coolify.")
 
-def extraire_texte(img_array):
-    """Lance l'OCR et retourne le texte brut + confiance moyenne."""
-    ocr = get_ocr_instance()
-    result = ocr.ocr(img_array, cls=True)
 
-    if not result or not result[0]:
+def choisir_modele(type_doc: str) -> str:
+    if type_doc in ("CNI", "PASSEPORT"):
+        return "PP-OCRv6"
+    if type_doc in ("EXTRAIT_NAISSANCE", "CERTIFICAT_RESIDENCE"):
+        return "PP-StructureV3"
+    return "PP-OCRv6"
+
+
+def soumettre_job(image_bytes: bytes, model: str) -> str:
+    headers = {"Authorization": f"bearer {AISTUDIO_TOKEN}"}
+    optional_payload = {
+        "useDocOrientationClassify": False,
+        "useDocUnwarping": False,
+    }
+    if model == "PP-OCRv6":
+        optional_payload["useTextlineOrientation"] = False
+    else:
+        optional_payload["useChartRecognition"] = False
+
+    data = {
+        "model": model,
+        "optionalPayload": json.dumps(optional_payload)
+    }
+    files = {"file": ("document.jpg", image_bytes, "image/jpeg")}
+
+    resp = requests.post(JOB_URL, headers=headers, data=data, files=files, timeout=30)
+
+    if resp.status_code == 429:
+        raise RuntimeError("QUOTA_DEPASSE")
+    if resp.status_code in (401, 403):
+        raise RuntimeError("TOKEN_EXPIRE")
+
+    resp.raise_for_status()
+    return resp.json()["data"]["jobId"]
+
+
+def attendre_job(job_id: str, timeout_max: int = 45) -> dict:
+    headers = {"Authorization": f"bearer {AISTUDIO_TOKEN}"}
+    debut = time.time()
+
+    while time.time() - debut < timeout_max:
+        resp = requests.get(f"{JOB_URL}/{job_id}", headers=headers, timeout=15)
+        resp.raise_for_status()
+        payload = resp.json()["data"]
+        state = payload["state"]
+
+        if state == "done":
+            return {"succes": True, "url": payload["resultUrl"]["jsonUrl"]}
+        if state == "failed":
+            return {"succes": False, "erreur": payload.get("errorMsg", "Erreur inconnue")}
+
+        time.sleep(2)
+
+    return {"succes": False, "erreur": "Timeout: traitement trop long"}
+
+
+def extraire_texte_ocrv6(resultat_json: dict):
+    textes, scores = [], []
+    for res in resultat_json.get("ocrResults", []):
+        pruned = res.get("prunedResult", {})
+        textes.extend(pruned.get("rec_texts", []))
+        scores.extend(pruned.get("rec_scores", []))
+
+    texte = " ".join(textes)
+    confiance = sum(scores) / len(scores) if scores else 0.0
+    return texte, confiance
+
+
+def extraire_texte_structurev3(resultat_json: dict):
+    textes = []
+    for res in resultat_json.get("layoutParsingResults", []):
+        textes.append(res.get("markdown", {}).get("text", ""))
+
+    texte_md = "\n".join(textes)
+    texte_nettoye = texte_md.replace("|", " ").replace("#", " ").replace("*", " ")
+    confiance = 0.85 if len(texte_nettoye.strip()) > 20 else 0.3
+    return texte_nettoye, confiance
+
+
+def traiter_document(image_bytes: bytes, type_doc: str):
+    model = choisir_modele(type_doc)
+    job_id = soumettre_job(image_bytes, model)
+    resultat_job = attendre_job(job_id)
+
+    if not resultat_job["succes"]:
+        raise RuntimeError(resultat_job["erreur"])
+
+    jsonl_resp = requests.get(resultat_job["url"], timeout=30)
+    jsonl_resp.raise_for_status()
+
+    lignes = [l for l in jsonl_resp.text.strip().split("\n") if l.strip()]
+    if not lignes:
         return "", 0.0
 
-    texte = " ".join(
-        ligne[1][0] for ligne in result[0] if ligne[1][1] > 0.5
-    )
-    scores = [ligne[1][1] for ligne in result[0]]
-    confiance_moy = sum(scores) / len(scores) if scores else 0
-    return texte, confiance_moy
+    resultat_json = json.loads(lignes[0])["result"]
+
+    if model == "PP-OCRv6":
+        return extraire_texte_ocrv6(resultat_json)
+    return extraire_texte_structurev3(resultat_json)
+
 
 @app.get("/sante")
 async def health_check():
     return {
         "status": "healthy",
-        "model": "PP-OCRv6_medium",
-        "paddle_version": "2.6.1"
+        "backend": "AIStudio PaddleOCR (cloud)",
+        "modeles": ["PP-OCRv6", "PP-StructureV3"],
+        "token_configure": bool(AISTUDIO_TOKEN)
     }
+
 
 @app.post("/analyser-base64")
 async def analyser_base64(data: dict):
-    """
-    Corps attendu :
-    {
-        "image": "base64...",
-        "type_document": "CNI|PASSEPORT|EXTRAIT_NAISSANCE|AUTO",
-        "donnees_declarees": {
-            "nom": "KONE",
-            "prenoms": "ALY ROGER",
-            "date_naissance": "06/02/1996",
-            "numero_piece": "CI0012345678"
-        }
-    }
-    """
     start_time = time.time()
     try:
         img_b64 = data.get("image")
         if not img_b64:
-            raise HTTPException(
-                status_code=400,
-                detail="Champ 'image' manquant"
-            )
+            raise HTTPException(status_code=400, detail="Champ 'image' manquant")
 
         type_doc = data.get("type_document", "AUTO")
         declarees = data.get("donnees_declarees", {})
 
         img_bytes = base64.b64decode(img_b64)
         image = Image.open(io.BytesIO(img_bytes))
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
-
+        if image.mode != "RGB":
+            image = image.convert("RGB")
         if image.size[0] < 50 or image.size[1] < 50:
-            return {
-                "succes": False,
-                "action": "REUPLOADER",
-                "message": "Image trop petite ou corrompue"
-            }
+            return {"succes": False, "action": "REUPLOADER", "message": "Image trop petite ou corrompue"}
 
-        img_array = np.array(image)
-        texte, confiance_moy = extraire_texte(img_array)
-        est_lisible = confiance_moy > 0.6
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG", quality=92)
+        img_bytes_norm = buffer.getvalue()
 
-        if not texte:
+        try:
+            texte, confiance_moy = traiter_document(img_bytes_norm, type_doc)
+        except RuntimeError as e:
+            if str(e) == "QUOTA_DEPASSE":
+                logger.error("Quota AIStudio depasse (429)")
+                return {"succes": False, "action": "VERIFIER_MANUELLEMENT",
+                        "message": "Service sature, nouvelle tentative dans un instant."}
+            if str(e) == "TOKEN_EXPIRE":
+                logger.error("Token AIStudio expire/invalide")
+                return {"succes": False, "action": "VERIFIER_MANUELLEMENT",
+                        "message": "Erreur de configuration du service. Equipe technique alertee."}
+            raise
+
+        est_lisible = confiance_moy > 0.5
+
+        if not texte.strip():
             return {
-                "succes": True,
-                "texte_brut": "",
-                "est_lisible": False,
-                "infos_extraites": {},
-                "correspondance": {},
-                "validite_dates": {},
+                "succes": True, "texte_brut": "", "est_lisible": False,
+                "infos_extraites": {}, "correspondance": {}, "validite_dates": {},
                 "action": "REUPLOADER",
-                "message": (
-                    "Document illisible. Veuillez uploader "
-                    "une image plus claire."
-                )
+                "message": "Document illisible. Veuillez uploader une image plus claire."
             }
 
         infos = parser_document(texte, type_doc)
         infos["confiance_lecture"] = round(confiance_moy * 100, 1)
-
         correspondance = verifier_correspondance(infos, declarees)
         dates = verifier_dates(infos, type_doc)
         resultat = determiner_action(correspondance, dates, est_lisible)
 
         processing_time = round((time.time() - start_time) * 1000, 2)
-        logger.info(
-            f"Decision: {resultat['action']} en {processing_time}ms"
-        )
+        logger.info(f"Decision: {resultat['action']} en {processing_time}ms")
 
         return {
             "succes": True,
             "texte_brut": texte,
             "est_lisible": est_lisible,
             "confiance_moyenne": round(confiance_moy * 100, 1),
+            "modele_utilise": choisir_modele(type_doc),
             "infos_extraites": infos,
             "correspondance": correspondance,
             "validite_dates": dates,
@@ -169,45 +218,22 @@ async def analyser_base64(data: dict):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Erreur analyse: {str(e)}", exc_info=True)
-        return {
-            "succes": False,
-            "erreur": str(e),
-            "action": "REUPLOADER",
-            "message": (
-                "Une erreur est survenue lors de l'analyse. "
-                "Veuillez reessayer."
-            )
-        }
+        logger.error(f"Erreur analyse: {str(e)}")
+        return {"succes": False, "erreur": str(e), "action": "REUPLOADER",
+                "message": "Une erreur est survenue. Veuillez reessayer."}
+
 
 @app.post("/ocr")
-async def ocr_endpoint(file: UploadFile = File(...)):
-    start_time = time.time()
+async def ocr_test(file: UploadFile = File(...), type_document: str = "CNI"):
     try:
         contents = await file.read()
-        image = Image.open(io.BytesIO(contents))
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
-
-        img_array = np.array(image)
-        ocr = get_ocr_instance()
-        result = ocr.ocr(img_array, cls=True)
-
-        processing_time = time.time() - start_time
-        texts = []
-        if result and result[0]:
-            for line in result[0]:
-                texts.append({
-                    "text": line[1][0],
-                    "confidence": float(line[1][1]),
-                    "box": line[0]
-                })
-
+        texte, confiance = traiter_document(contents, type_document)
         return {
             "status": "success",
-            "processing_time_ms": round(processing_time * 1000, 2),
-            "results": texts
+            "modele_utilise": choisir_modele(type_document),
+            "texte": texte,
+            "confiance_moyenne": round(confiance * 100, 1)
         }
     except Exception as e:
-        logger.error(f"Erreur OCR: {str(e)}", exc_info=True)
+        logger.error(f"Erreur OCR test: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
