@@ -1,24 +1,21 @@
 import re
 import unicodedata
-import codecs
 from datetime import datetime, timedelta
 
 def decoder_texte_brut(texte: str) -> str:
-    """Décode les séquences Unicode échappées"""
+    """Décode les séquences Unicode échappées \\uXXXX en caractères réels"""
     if not texte:
         return ""
-    try:
-        texte = codecs.decode(texte, 'unicode_escape')
-        texte = texte.replace('\u0027', "'")\
-                    .replace('\u003c', '<')\
-                    .replace('\u003e', '>')\
-                    .replace('\u00c4', 'Ä')\
-                    .replace('\u00c2', 'Â')\
-                    .replace('\u00e9', 'é')\
-                    .replace('\u00e8', 'è')
-        return texte
-    except:
-        return texte
+    
+    # Remplacer les séquences \uXXXX par leur caractère Unicode
+    def replace_unicode_escape(match):
+        return chr(int(match.group(1), 16))
+    
+    # Pattern pour trouver \uXXXX
+    pattern = r'\\u([0-9a-fA-F]{4})'
+    texte = re.sub(pattern, replace_unicode_escape, texte)
+    
+    return texte
 
 def normaliser_nom(texte: str) -> str:
     if not texte:
@@ -47,7 +44,7 @@ def _parser_date(date_str: str):
         return None
 
 def parser_document(texte: str, type_doc: str) -> dict:
-    # 🔴 LIGNE CRITIQUE AJOUTÉE
+    # 🔴 DÉCODER le texte d'abord !
     texte = decoder_texte_brut(texte)
     
     infos = {
