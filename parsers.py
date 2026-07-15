@@ -330,8 +330,7 @@ def determiner_action(correspondance: dict, dates: dict, est_lisible: bool = Tru
         if score >= 50:
             return {
                 "action": "VERIFIER_MANUELLEMENT",
-                "message": "Le nom sur le document ne correspond pas exactement aux données déclarées. Vérification manuelle requise."
- “}
+                "message": "Le nom sur le document ne correspond pas exactement aux données déclarées. Vérification manuelle requise."}
         return {
             "action": "REJETER",
             "message": "Le nom sur le document ne correspond pas aux données déclarées. Vérifiez vos informations ou contactez la mairie."
